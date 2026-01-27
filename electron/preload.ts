@@ -33,7 +33,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Shell
   shell: {
     openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path),
-    openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url)
+    openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+    showItemInFolder: (fullPath: string) => ipcRenderer.invoke('shell:showItemInFolder', fullPath)
   },
 
   // App
@@ -198,12 +199,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     downloadEmoji: (cdnUrl: string, md5?: string, productId?: string, createTime?: number) => ipcRenderer.invoke('chat:downloadEmoji', cdnUrl, md5, productId, createTime),
     close: () => ipcRenderer.invoke('chat:close'),
     refreshCache: () => ipcRenderer.invoke('chat:refreshCache'),
+    setCurrentSession: (sessionId: string | null) => ipcRenderer.invoke('chat:setCurrentSession', sessionId),
     getSessionDetail: (sessionId: string) => ipcRenderer.invoke('chat:getSessionDetail', sessionId),
     getVoiceData: (sessionId: string, msgId: string, createTime?: number) => ipcRenderer.invoke('chat:getVoiceData', sessionId, msgId, createTime),
     onSessionsUpdated: (callback: (sessions: any[]) => void) => {
       const listener = (_: any, sessions: any[]) => callback(sessions)
       ipcRenderer.on('chat:sessions-updated', listener)
       return () => ipcRenderer.removeListener('chat:sessions-updated', listener)
+    },
+    onNewMessages: (callback: (data: { sessionId: string; messages: any[] }) => void) => {
+      const listener = (_: any, data: any) => callback(data)
+      ipcRenderer.on('chat:new-messages', listener)
+      return () => ipcRenderer.removeListener('chat:new-messages', listener)
     }
   },
 

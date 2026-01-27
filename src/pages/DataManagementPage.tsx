@@ -111,6 +111,17 @@ function DataManagementPage() {
   }
 
   const handleDecryptAll = async () => {
+    // 先检查是否配置了解密密钥
+    const decryptKey = await window.electronAPI.config.get('decryptKey')
+    if (!decryptKey) {
+      showMessage('请先在设置页面配置解密密钥', false)
+      // 3秒后自动跳转到设置页面
+      setTimeout(() => {
+        window.location.hash = '#/settings'
+      }, 3000)
+      return
+    }
+
     // 检查聊天窗口是否打开
     const isChatOpen = await window.electronAPI.window.isChatWindowOpen()
     if (isChatOpen) {

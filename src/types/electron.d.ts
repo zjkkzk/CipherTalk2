@@ -46,6 +46,7 @@ export interface ElectronAPI {
   shell: {
     openPath: (path: string) => Promise<string>
     openExternal: (url: string) => Promise<void>
+    showItemInFolder: (fullPath: string) => Promise<void>
   }
   app: {
     getDownloadsPath: () => Promise<string>
@@ -202,6 +203,8 @@ export interface ElectronAPI {
     downloadEmoji: (cdnUrl: string, md5?: string, productId?: string, createTime?: number) => Promise<{ success: boolean; localPath?: string; error?: string }>
     close: () => Promise<boolean>
     refreshCache: () => Promise<boolean>
+    setCurrentSession: (sessionId: string | null) => Promise<boolean>
+    onNewMessages: (callback: (data: { sessionId: string; messages: Message[] }) => void) => () => void
     getSessionDetail: (sessionId: string) => Promise<{
       success: boolean
       detail?: {
@@ -387,7 +390,7 @@ export interface ElectronAPI {
       successCount?: number
       error?: string
     }>
-    onProgress: (callback: (data: { 
+    onProgress: (callback: (data: {
       current?: number
       total?: number
       currentSession?: string

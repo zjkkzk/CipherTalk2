@@ -36,6 +36,18 @@ export default defineConfig({
         }
       },
       {
+        // 数据库解密 Worker 线程
+        entry: 'electron/workers/decryptWorker.js',
+        vite: {
+          build: {
+            outDir: 'dist-electron/workers',
+            rollupOptions: {
+              external: ['koffi']
+            }
+          }
+        }
+      },
+      {
         // 语音转写 Worker 线程
         entry: 'electron/transcribeWorker.ts',
         vite: {

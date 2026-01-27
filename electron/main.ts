@@ -3,7 +3,7 @@ import { join } from 'path'
 import { readFileSync, existsSync } from 'fs'
 import { autoUpdater } from 'electron-updater'
 import { DatabaseService } from './services/database'
-import { DecryptService } from './services/decrypt'
+
 import { wechatDecryptService } from './services/decryptService'
 import { ConfigService } from './services/config'
 import { wxKeyService } from './services/wxKeyService'
@@ -65,7 +65,7 @@ function isNewerVersion(version1: string, version2: string): boolean {
 
 // 单例服务
 let dbService: DatabaseService | null = null
-let decryptService: DecryptService | null = null
+
 let configService: ConfigService | null = null
 let logService: LogService | null = null
 
@@ -125,7 +125,7 @@ function createWindow() {
   // 初始化服务
   configService = new ConfigService()
   dbService = new DatabaseService()
-  decryptService = new DecryptService()
+
   logService = new LogService(configService)
 
   // 记录应用启动日志
@@ -888,11 +888,22 @@ function registerIpcHandlers() {
 
   // 解密相关
   ipcMain.handle('decrypt:database', async (_, sourcePath: string, key: string, outputPath: string) => {
-    return decryptService?.decryptDatabase(sourcePath, key, outputPath)
+    return wechatDecryptService.decryptDatabase(sourcePath, outputPath, key)
   })
 
   ipcMain.handle('decrypt:image', async (_, imagePath: string) => {
-    return decryptService?.decryptImage(imagePath)
+    return null
+  })
+
+  // ... (其他 IPC)
+
+  // 监听增量消息推送
+  chatService.on('new-messages', (data) => {
+    BrowserWindow.getAllWindows().forEach(win => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('chat:new-messages', data)
+      }
+    })
   })
 
   // 文件对话框
@@ -914,6 +925,11 @@ function registerIpcHandlers() {
   ipcMain.handle('shell:openExternal', async (_, url: string) => {
     const { shell } = await import('electron')
     return shell.openExternal(url)
+  })
+
+  ipcMain.handle('shell:showItemInFolder', async (_, fullPath: string) => {
+    const { shell } = await import('electron')
+    return shell.showItemInFolder(fullPath)
   })
 
   ipcMain.handle('app:getDownloadsPath', async () => {
@@ -1124,7 +1140,7 @@ function registerIpcHandlers() {
 
       // 发送状态：准备启动微信
       event.sender.send('wxkey:status', { status: '正在安装 Hook...', level: 1 })
-      
+
       // 获取微信路径
       const wechatPath = customWechatPath || wxKeyService.getWeChatPath()
       if (!wechatPath) {
@@ -1223,10 +1239,10 @@ function registerIpcHandlers() {
   ipcMain.handle('dbpath:getBestCachePath', async () => {
     const { existsSync } = require('fs')
     const { join } = require('path')
-    
+
     // 按优先级检查磁盘：D、E、F、C
     const drives = ['D', 'E', 'F', 'C']
-    
+
     for (const drive of drives) {
       const drivePath = `${drive}:\\`
       if (existsSync(drivePath)) {
@@ -1235,7 +1251,7 @@ function registerIpcHandlers() {
         return { success: true, path: cachePath, drive }
       }
     }
-    
+
     // 如果都没有，返回用户目录下的默认路径
     const { app } = require('electron')
     const defaultPath = join(app.getPath('userData'), 'cache')
@@ -1282,19 +1298,19 @@ function registerIpcHandlers() {
   // 数据库解密
   ipcMain.handle('wcdb:decryptDatabase', async (event, dbPath: string, hexKey: string, wxid: string) => {
     logService?.info('Decrypt', '开始解密数据库', { dbPath, wxid })
-    
+
     try {
       // 使用已有的 dataManagementService 来解密
       const result = await dataManagementService.decryptAll()
-      
+
       if (result.success) {
-        logService?.info('Decrypt', '解密完成', { 
-          successCount: result.successCount, 
-          failCount: result.failCount 
+        logService?.info('Decrypt', '解密完成', {
+          successCount: result.successCount,
+          failCount: result.failCount
         })
-        
-        return { 
-          success: true, 
+
+        return {
+          success: true,
           totalFiles: (result.successCount || 0) + (result.failCount || 0),
           successCount: result.successCount,
           failCount: result.failCount
@@ -1561,6 +1577,11 @@ function registerIpcHandlers() {
     return true
   })
 
+  ipcMain.handle('chat:setCurrentSession', async (_, sessionId: string | null) => {
+    chatService.setCurrentSession(sessionId)
+    return true
+  })
+
   ipcMain.handle('chat:getSessionDetail', async (_, sessionId: string) => {
     const result = await chatService.getSessionDetail(sessionId)
     if (!result.success) {
@@ -1672,7 +1693,7 @@ function registerIpcHandlers() {
     if (welcomeWindow && !welcomeWindow.isDestroyed()) {
       welcomeWindow.close()
     }
-    
+
     // 如果主窗口还不存在，创建它
     if (!mainWindow || mainWindow.isDestroyed()) {
       mainWindow = createWindow()
@@ -1681,7 +1702,7 @@ function registerIpcHandlers() {
       mainWindow.show()
       mainWindow.focus()
     }
-    
+
     return true
   })
 
@@ -1978,8 +1999,8 @@ function registerIpcHandlers() {
     try {
       const { proxyService } = await import('./services/ai/proxyService')
       const proxyUrl = await proxyService.getSystemProxy()
-      return { 
-        success: true, 
+      return {
+        success: true,
         hasProxy: !!proxyUrl,
         proxyUrl: proxyUrl || null
       }
@@ -1993,8 +2014,8 @@ function registerIpcHandlers() {
       const { proxyService } = await import('./services/ai/proxyService')
       proxyService.clearCache()
       const proxyUrl = await proxyService.getSystemProxy()
-      return { 
-        success: true, 
+      return {
+        success: true,
         hasProxy: !!proxyUrl,
         proxyUrl: proxyUrl || null,
         message: proxyUrl ? `已刷新代理: ${proxyUrl}` : '未检测到代理，使用直连'
@@ -2008,8 +2029,8 @@ function registerIpcHandlers() {
     try {
       const { proxyService } = await import('./services/ai/proxyService')
       const success = await proxyService.testProxy(proxyUrl, testUrl)
-      return { 
-        success, 
+      return {
+        success,
         message: success ? '代理连接正常' : '代理连接失败'
       }
     } catch (e) {

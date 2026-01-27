@@ -1,13 +1,22 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { createPortal } from 'react-dom'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Image as ImageIcon, Play, Video, Copy, ZoomIn, CheckSquare, Check, Edit, Link, Sparkles } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, Info, Calendar, Database, Hash, Image as ImageIcon, Play, Video, Copy, ZoomIn, CheckSquare, Check, Edit, Link, Sparkles, FileText, FileArchive } from 'lucide-react'
 import { useChatStore } from '../stores/chatStore'
 import { useUpdateStatusStore } from '../stores/updateStatusStore'
 import ChatBackground from '../components/ChatBackground'
 import MessageContent from '../components/MessageContent'
 import { getImageXorKey, getImageAesKey, getQuoteStyle } from '../services/config'
+import { LRUCache } from '../utils/lruCache'
 import type { ChatSession, Message } from '../types/models'
+import { List, RowComponentProps } from 'react-window'
 import './ChatPage.scss'
+
+interface SessionRowData {
+  sessions: ChatSession[]
+  currentSessionId: string | null
+  onSelect: (s: ChatSession) => void
+  formatTime: (t: number) => string
+}
 
 
 
@@ -151,6 +160,48 @@ function SessionAvatar({ session, size = 48 }: { session: ChatSession; size?: nu
       ) : (
         <div className="avatar-skeleton" />
       )}
+    </div>
+  )
+}
+
+// 会话列表行组件（使用 memo 优化性能）
+const SessionRow = (props: RowComponentProps<SessionRowData>) => {
+  const { index, style, sessions, currentSessionId, onSelect, formatTime } = props
+  const session = sessions[index]
+
+  return (
+    <div
+      style={style}
+      className={`session-item ${currentSessionId === session.username ? 'active' : ''}`}
+      onClick={() => onSelect(session)}
+    >
+      <SessionAvatar session={session} size={48} />
+      <div className="session-info">
+        <div className="session-top">
+          <span className="session-name">{session.displayName || session.username}</span>
+          <span className="session-time">{formatTime(session.lastTimestamp || session.sortTimestamp)}</span>
+        </div>
+        <div className="session-bottom">
+          <span className="session-summary">
+            {(() => {
+              const summary = session.summary || '暂无消息'
+              const firstLine = summary.split('\n')[0]
+              const hasMoreLines = summary.includes('\n')
+              return (
+                <>
+                  <MessageContent content={firstLine} disableLinks={true} />
+                  {hasMoreLines && <span>...</span>}
+                </>
+              )
+            })()}
+          </span>
+          {session.unreadCount > 0 && (
+            <span className="unread-badge">
+              {session.unreadCount > 99 ? '99+' : session.unreadCount}
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -322,14 +373,14 @@ function ChatPage(_props: ChatPageProps) {
           // 合并：保留顺序，只更新变化的字段
           const merged = result.sessions!.map(newSession => {
             const oldSession = oldSessionsMap.get(newSession.username)
-            
+
             // 如果是新会话，直接返回
             if (!oldSession) {
               return newSession
             }
 
             // 检查是否有实质性变化
-            const hasChanges = 
+            const hasChanges =
               oldSession.summary !== newSession.summary ||
               oldSession.lastTimestamp !== newSession.lastTimestamp ||
               oldSession.unreadCount !== newSession.unreadCount ||
@@ -438,6 +489,40 @@ function ChatPage(_props: ChatPageProps) {
       }
     }
   }
+
+  // 监听增量消息推送
+  useEffect(() => {
+    // 告知后端当前会话
+    window.electronAPI.chat.setCurrentSession(currentSessionId)
+
+    const cleanup = window.electronAPI.chat.onNewMessages((data: { sessionId: string; messages: Message[] }) => {
+      if (data.sessionId === currentSessionId && data.messages && data.messages.length > 0) {
+        setMessages((prev: Message[]) => {
+          // 使用 sortSeq 去重
+          const newMsgs = data.messages.filter((nm: Message) =>
+            !prev.some((pm: Message) => pm.sortSeq === nm.sortSeq)
+          )
+          if (newMsgs.length === 0) return prev
+
+          return [...prev, ...newMsgs]
+        })
+
+        // 平滑滚动到底部
+        requestAnimationFrame(() => scrollToBottom(true))
+      }
+    })
+
+    return () => {
+      cleanup()
+    }
+  }, [currentSessionId])
+
+  // 组件卸载时取消当前会话
+  useEffect(() => {
+    return () => {
+      window.electronAPI.chat.setCurrentSession(null)
+    }
+  }, [])
 
   // 选择会话
   const handleSelectSession = (session: ChatSession) => {
@@ -559,11 +644,11 @@ function ChatPage(_props: ChatPageProps) {
   useEffect(() => {
     if (!isConnected) return
 
-  // 监听会话列表更新
+    // 监听会话列表更新
     const removeSessionsListener = window.electronAPI.chat.onSessionsUpdated?.(async (newSessions) => {
       // 更新增量更新时间戳
       lastIncrementalUpdateTime = Date.now()
-      
+
       // 智能合并更新会话列表，避免闪烁
       setSessions((prevSessions: ChatSession[]) => {
         // 如果之前没有会话，直接设置
@@ -579,14 +664,14 @@ function ChatPage(_props: ChatPageProps) {
         // 合并：保留顺序，只更新变化的字段
         const merged = newSessions.map(newSession => {
           const oldSession = oldSessionsMap.get(newSession.username)
-          
+
           // 如果是新会话，直接返回
           if (!oldSession) {
             return newSession
           }
 
           // 检查是否有实质性变化
-          const hasChanges = 
+          const hasChanges =
             oldSession.summary !== newSession.summary ||
             oldSession.lastTimestamp !== newSession.lastTimestamp ||
             oldSession.unreadCount !== newSession.unreadCount ||
@@ -817,43 +902,22 @@ function ChatPage(_props: ChatPageProps) {
             ))}
           </div>
         ) : filteredSessions.length > 0 ? (
-          <div className="session-list">
-            {filteredSessions.map(session => (
-              <div
-                key={session.username}
-                className={`session-item ${currentSessionId === session.username ? 'active' : ''}`}
-                onClick={() => handleSelectSession(session)}
-              >
-                <SessionAvatar session={session} size={48} />
-                <div className="session-info">
-                  <div className="session-top">
-                    <span className="session-name">{session.displayName || session.username}</span>
-                    <span className="session-time">{formatSessionTime(session.lastTimestamp || session.sortTimestamp)}</span>
-                  </div>
-                  <div className="session-bottom">
-                    <span className="session-summary">
-                      {(() => {
-                        const summary = session.summary || '暂无消息'
-                        const firstLine = summary.split('\n')[0]
-                        const hasMoreLines = summary.includes('\n')
-                        return (
-                          <>
-                            <MessageContent content={firstLine} disableLinks={true} />
-                            {hasMoreLines && <span>...</span>}
-                          </>
-                        )
-                      })()}
-                    </span>
-                    {session.unreadCount > 0 && (
-                      <span className="unread-badge">
-                        {session.unreadCount > 99 ? '99+' : session.unreadCount}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
+          <div className="session-list" style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
+            {/* @ts-ignore - 类型定义不匹配但不影响运行 */}
+            <List
+              style={{ height: '100%', width: '100%' }}
+              rowCount={filteredSessions.length}
+              rowHeight={72}
+              rowProps={{
+                sessions: filteredSessions,
+                currentSessionId,
+                onSelect: handleSelectSession,
+                formatTime: formatSessionTime
+              }}
+              rowComponent={SessionRow}
+            />
           </div>
+
         ) : (
           <div className="empty-sessions">
             <MessageSquare />
@@ -1357,10 +1421,10 @@ function ChatPage(_props: ChatPageProps) {
   )
 }
 
-// 前端表情包缓存
-const emojiDataUrlCache = new Map<string, string>()
-// 前端图片缓存
-const imageDataUrlCache = new Map<string, string>()
+// 前端表情包缓存 (LRU 限制)
+const emojiDataUrlCache = new LRUCache<string, string>(200)
+// 前端图片缓存 (LRU 限制)
+const imageDataUrlCache = new LRUCache<string, string>(50)
 
 // 图片解密队列管理
 const imageDecryptQueue: Array<() => Promise<void>> = []
@@ -1387,7 +1451,7 @@ function enqueueDecrypt(fn: () => Promise<void>) {
 }
 
 // 视频信息缓存（带时间戳）
-const videoInfoCache = new Map<string, { 
+const videoInfoCache = new Map<string, {
   videoUrl?: string
   coverUrl?: string
   thumbUrl?: string
@@ -1652,12 +1716,12 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, h
     if (cached) {
       // 智能缓存失效：如果视频不存在，且缓存时间早于最后一次增量更新，则重新获取
       const shouldRefetch = !cached.exists && cached.cachedAt < lastIncrementalUpdateTime
-      
+
       if (!shouldRefetch) {
         setVideoInfo(cached)
         return
       }
-      
+
       // 需要重新获取，清除旧缓存
       videoInfoCache.delete(message.videoMd5)
     }
@@ -1845,7 +1909,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, h
 
   // 群聊中获取发送者信息
   const [isLoadingSender, setIsLoadingSender] = useState(false)
-  
+
   useEffect(() => {
     if (isGroupChat && !isSent && message.senderUsername) {
       setIsLoadingSender(true)
@@ -1855,7 +1919,7 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, h
           setSenderName(result.displayName)
         }
         setIsLoadingSender(false)
-      }).catch(() => { 
+      }).catch(() => {
         setIsLoadingSender(false)
       })
     }
@@ -2436,26 +2500,122 @@ function MessageBubble({ message, session, showTime, myAvatarUrl, isGroupChat, h
         )
       }
 
+      // 文件消息 (type=6)：渲染为文件卡片
+      if (appMsgType === '6') {
+        // 优先使用从接口获取的文件信息，否则从 XML 解析
+        const fileName = message.fileName || title || '文件'
+        const fileSize = message.fileSize
+        const fileExt = message.fileExt || fileName.split('.').pop()?.toLowerCase() || ''
+        const fileMd5 = message.fileMd5
+
+        // 格式化文件大小
+        const formatFileSize = (bytes: number | undefined): string => {
+          if (!bytes) return ''
+          if (bytes < 1024) return `${bytes} B`
+          if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+          if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+          return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+        }
+
+        // 根据扩展名选择图标
+        const getFileIcon = (ext: string) => {
+          const archiveExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2']
+          if (archiveExts.includes(ext)) {
+            return <FileArchive size={28} />
+          }
+          return <FileText size={28} />
+        }
+
+        // 点击文件消息，定位到文件所在文件夹并选中文件
+        const handleFileClick = async () => {
+          try {
+            // 获取用户设置的微信原始存储目录（不是解密缓存目录）
+            const wechatDir = await window.electronAPI.config.get('dbPath') as string
+            if (!wechatDir) {
+              console.error('未设置微信存储目录')
+              return
+            }
+
+            // 获取当前用户信息
+            const userInfo = await window.electronAPI.chat.getMyUserInfo()
+            if (!userInfo.success || !userInfo.userInfo) {
+              console.error('无法获取用户信息')
+              return
+            }
+
+            const wxid = userInfo.userInfo.wxid
+            
+            // 文件存储在 {微信存储目录}\{账号文件夹}\msg\file\{年-月}\ 目录下
+            // 根据消息创建时间计算日期目录
+            const msgDate = new Date(message.createTime * 1000)
+            const year = msgDate.getFullYear()
+            const month = String(msgDate.getMonth() + 1).padStart(2, '0')
+            const dateFolder = `${year}-${month}`
+            
+            // 构建完整文件路径（包括文件名）
+            const filePath = `${wechatDir}\\${wxid}\\msg\\file\\${dateFolder}\\${fileName}`
+
+            // 使用 showItemInFolder 在文件管理器中定位并选中文件
+            try {
+              await window.electronAPI.shell.showItemInFolder(filePath)
+            } catch (err) {
+              // 如果文件不存在或路径错误，尝试只打开文件夹
+              console.warn('无法定位到具体文件，尝试打开文件夹:', err)
+              const fileDir = `${wechatDir}\\${wxid}\\msg\\file\\${dateFolder}`
+              const result = await window.electronAPI.shell.openPath(fileDir)
+              
+              // 如果还是失败，打开上级目录
+              if (result) {
+                console.warn('无法打开月份文件夹，尝试打开上级目录')
+                const parentDir = `${wechatDir}\\${wxid}\\msg\\file`
+                await window.electronAPI.shell.openPath(parentDir)
+              }
+            }
+          } catch (error) {
+            console.error('打开文件夹失败:', error)
+          }
+        }
+
+        return (
+          <div 
+            className="file-message" 
+            onClick={handleFileClick}
+            style={{ cursor: 'pointer' }}
+            title="点击定位到文件所在文件夹"
+          >
+            <div className="file-icon">
+              {getFileIcon(fileExt)}
+            </div>
+            <div className="file-info">
+              <div className="file-name" title={fileName}>{fileName}</div>
+              <div className="file-meta">
+                {fileSize ? formatFileSize(fileSize) : ''}
+              </div>
+            </div>
+          </div>
+        )
+      }
+
       // 转账消息 (type=2000)：渲染为转账卡片
       if (appMsgType === '2000') {
         try {
           const content = message.rawContent || message.parsedContent || ''
           const parser = new DOMParser()
           const doc = parser.parseFromString(content, 'text/xml')
-          
+
           const feedesc = doc.querySelector('feedesc')?.textContent || ''
           const payMemo = doc.querySelector('pay_memo')?.textContent || ''
           const paysubtype = doc.querySelector('paysubtype')?.textContent || '1'
-          
+
           // paysubtype: 1=待收款, 3=已收款
           const isReceived = paysubtype === '3'
-          
+
           return (
             <div className={`transfer-message ${isReceived ? 'received' : ''}`}>
               <div className="transfer-icon">
                 <svg width="32" height="32" viewBox="0 0 40 40" fill="none">
-                  <circle cx="20" cy="20" r="18" stroke="white" strokeWidth="2"/>
-                  <path d="M12 20h16M20 12l8 8-8 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <circle cx="20" cy="20" r="18" stroke="white" strokeWidth="2" />
+                  <path d="M12 20h16M20 12l8 8-8 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </div>
               <div className="transfer-info">

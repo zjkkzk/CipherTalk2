@@ -55,6 +55,11 @@ export interface Message {
   voiceDuration?: number  // 语音时长（秒）
   // 商店表情相关
   productId?: string
+  // 文件消息相关
+  fileName?: string       // 文件名
+  fileSize?: number       // 文件大小（字节）
+  fileExt?: string        // 文件扩展名
+  fileMd5?: string        // 文件 MD5
 }
 
 export interface Contact {
@@ -104,9 +109,22 @@ class ChatService extends EventEmitter {
   private syncTimer: NodeJS.Timeout | null = null
   private lastDbCheckTime: number = 0
 
+  // 增量同步相关
+  private currentSessionId: string | null = null
+  // 记录每个会话已读取的最大 sortSeq (用于此后的增量查询)
+  private sessionCursor: Map<string, number> = new Map()
+
   constructor() {
     super()
     this.configService = new ConfigService()
+  }
+
+  /**
+   * 设置当前聚焦的会话 ID
+   * 用于增量同步时只推送当前会话的消息
+   */
+  setCurrentSession(sessionId: string | null): void {
+    this.currentSessionId = sessionId
   }
 
   /**
@@ -322,6 +340,69 @@ class ChatService extends EventEmitter {
     this.contactColumnsCache = null
     this.avatarBase64Cache.clear()
     this.dbDir = null
+  }
+
+  /**
+   * 关闭指定的数据库文件（用于增量更新时释放单个文件）
+   * 这样可以在更新某个数据库时，不影响其他数据库的查询
+   */
+  closeDatabase(fileName: string): void {
+    const fileNameLower = fileName.toLowerCase()
+
+    // 检查是否是核心数据库
+    if (fileNameLower === 'session.db' && this.sessionDb) {
+      try { this.sessionDb.close() } catch { }
+      this.sessionDb = null
+      return
+    }
+
+    if (fileNameLower === 'contact.db' && this.contactDb) {
+      try { this.contactDb.close() } catch { }
+      this.contactDb = null
+      this.contactColumnsCache = null
+      return
+    }
+
+    if (fileNameLower === 'emoticon.db' && this.emoticonDb) {
+      try { this.emoticonDb.close() } catch { }
+      this.emoticonDb = null
+      return
+    }
+
+    if (fileNameLower === 'emotion.db' && this.emotionDb) {
+      try { this.emotionDb.close() } catch { }
+      this.emotionDb = null
+      return
+    }
+
+    if (fileNameLower === 'head_image.db' && this.headImageDb) {
+      try { this.headImageDb.close() } catch { }
+      this.headImageDb = null
+      this.avatarBase64Cache.clear()
+      return
+    }
+
+    // 检查是否是消息数据库（在缓存中查找）
+    const entries = Array.from(this.messageDbCache.entries())
+    for (let i = 0; i < entries.length; i++) {
+      const [dbPath, db] = entries[i]
+      if (dbPath.toLowerCase().endsWith(fileNameLower)) {
+        try { db.close() } catch { }
+        this.messageDbCache.delete(dbPath)
+        this.knownMessageDbFiles.delete(dbPath)
+        // 清除相关的预编译语句缓存
+        const stmtKeys = Array.from(this.preparedStmtCache.keys())
+        for (let j = 0; j < stmtKeys.length; j++) {
+          if (stmtKeys[j].startsWith(dbPath)) {
+            this.preparedStmtCache.delete(stmtKeys[j])
+          }
+        }
+        // 清除会话表缓存（因为可能包含这个数据库的信息）
+        this.sessionTableCache.clear()
+        this.sessionTableCacheTime = 0
+        return
+      }
+    }
   }
 
   /**
@@ -676,6 +757,9 @@ class ChatService extends EventEmitter {
     } catch {
       // ignore
     }
+
+    // 尝试推送增量消息
+    this.checkNewMessagesForCurrentSession()
   }
 
   /**
@@ -907,8 +991,13 @@ class ChatService extends EventEmitter {
     limit: number = 50
   ): Promise<{ success: boolean; messages?: Message[]; hasMore?: boolean; error?: string }> {
     try {
+      // 如果数据库未连接，尝试自动重连
+      // 这解决了增量更新期间数据库被关闭后，用户无法查询消息的问题
       if (!this.dbDir) {
-        return { success: false, error: '数据库未连接' }
+        const connectResult = await this.connect()
+        if (!connectResult.success) {
+          return { success: false, error: connectResult.error || '数据库未连接' }
+        }
       }
 
       // 获取当前用户的 wxid
@@ -1028,6 +1117,19 @@ class ChatService extends EventEmitter {
               quotedSender = quoteInfo.sender
             }
 
+            // 解析文件消息 (localType === 49 且 XML 中 type=6)
+            let fileName: string | undefined
+            let fileSize: number | undefined
+            let fileExt: string | undefined
+            let fileMd5: string | undefined
+            if (localType === 49 && content) {
+              const fileInfo = this.parseFileInfo(content)
+              fileName = fileInfo.fileName
+              fileSize = fileInfo.fileSize
+              fileExt = fileInfo.fileExt
+              fileMd5 = fileInfo.fileMd5
+            }
+
             const parsedContent = this.parseMessageContent(content, localType)
 
             allMessages.push({
@@ -1048,7 +1150,11 @@ class ChatService extends EventEmitter {
               imageMd5,
               imageDatName,
               videoMd5,
-              voiceDuration
+              voiceDuration,
+              fileName,
+              fileSize,
+              fileExt,
+              fileMd5
             })
           }
         } catch (e: any) {
@@ -1084,7 +1190,18 @@ class ChatService extends EventEmitter {
       const messages = allMessages.slice(offset, offset + limit)
 
       // 反转使最新消息在最后（UI 显示顺序）
+      // 反转使最新消息在最后（UI 显示顺序）
       messages.reverse()
+
+      // 更新增量游标（仅在拉取最新一页时）
+      if (offset === 0 && messages.length > 0) {
+        const latestMsg = messages[messages.length - 1]
+        // 记录已读取的最大 sortSeq
+        const currentCursor = this.sessionCursor.get(sessionId) || 0
+        if (latestMsg.sortSeq > currentCursor) {
+          this.sessionCursor.set(sessionId, latestMsg.sortSeq)
+        }
+      }
 
       return { success: true, messages, hasMore }
     } catch (e) {
@@ -1260,6 +1377,37 @@ class ChatService extends EventEmitter {
       return md5?.toLowerCase()
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * 解析文件消息信息
+   * 从 type=6 的文件消息 XML 中提取文件信息
+   */
+  private parseFileInfo(content: string): { fileName?: string; fileSize?: number; fileExt?: string; fileMd5?: string } {
+    if (!content) return {}
+
+    try {
+      // 检查是否是文件消息 (type=6)
+      const type = this.extractXmlValue(content, 'type')
+      if (type !== '6') return {}
+
+      // 提取文件名 (title)
+      const fileName = this.extractXmlValue(content, 'title')
+
+      // 提取文件大小 (totallen)
+      const totallenStr = this.extractXmlValue(content, 'totallen')
+      const fileSize = totallenStr ? parseInt(totallenStr, 10) : undefined
+
+      // 提取文件扩展名 (fileext)
+      const fileExt = this.extractXmlValue(content, 'fileext')
+
+      // 提取文件 MD5
+      const fileMd5 = this.extractXmlValue(content, 'md5')?.toLowerCase()
+
+      return { fileName, fileSize, fileExt, fileMd5 }
+    } catch {
+      return {}
     }
   }
 
@@ -1621,7 +1769,7 @@ class ChatService extends EventEmitter {
   private shouldKeepSession(username: string): boolean {
     if (!username) return false
     if (username.startsWith('gh_')) return false
-    
+
     // 过滤折叠对话占位符
     if (username === '@placeholder_foldgroup') return false
 
@@ -3254,7 +3402,7 @@ class ChatService extends EventEmitter {
     if (this.syncTimer) {
       clearInterval(this.syncTimer)
       this.syncTimer = null
-      console.log('[ChatService] 停止自动增量同步')
+      // console.log('[ChatService] 停止自动增量同步') // 减少日志
     }
   }
 
@@ -3317,6 +3465,187 @@ class ChatService extends EventEmitter {
       }
     } catch (e) {
       console.error('[ChatService] 检查更新出错:', e)
+    }
+  }
+
+  /**
+   * 检查当前会话的新消息并推送（增量同步）
+   * 采用 Push 模式，主动将新解密的消息推送到前端
+   */
+  private checkNewMessagesForCurrentSession(): void {
+    if (!this.currentSessionId) return
+
+    // 如果没有游标，说明尚未加载过历史消息，暂不推送（避免数据不连续）
+    const cursor = this.sessionCursor.get(this.currentSessionId) || 0
+    if (cursor === 0) return
+
+    try {
+      const tables = this.findSessionTables(this.currentSessionId)
+      if (tables.length === 0) return
+
+      const allNewMessages: Message[] = []
+
+      // 获取当前用户的 wxid
+      const myWxid = this.configService.get('myWxid')
+      const cleanedMyWxid = myWxid ? this.cleanAccountDirName(myWxid) : ''
+
+      for (const { db, tableName, dbPath } of tables) {
+        // 检查 Name2Id 表
+        const hasName2IdTable = this.checkTableExists(db, 'Name2Id')
+
+        // 鲁棒的 myRowId 查找逻辑 (与 getMessages 保持一致)
+        let myRowId: number | null = null
+        if (myWxid && hasName2IdTable) {
+          const cacheKeyOriginal = `${dbPath}:${myWxid}`
+          const cachedRowIdOriginal = this.myRowIdCache.get(cacheKeyOriginal)
+
+          if (cachedRowIdOriginal !== undefined) {
+            myRowId = cachedRowIdOriginal
+          } else {
+            try {
+              const row = db.prepare('SELECT rowid FROM Name2Id WHERE user_name = ?').get(myWxid) as any
+              if (row?.rowid) {
+                myRowId = row.rowid
+                this.myRowIdCache.set(cacheKeyOriginal, myRowId)
+              } else if (cleanedMyWxid && cleanedMyWxid !== myWxid) {
+                const cacheKeyCleaned = `${dbPath}:${cleanedMyWxid}`
+                const cachedRowIdCleaned = this.myRowIdCache.get(cacheKeyCleaned)
+
+                if (cachedRowIdCleaned !== undefined) {
+                  myRowId = cachedRowIdCleaned
+                } else {
+                  const row2 = db.prepare('SELECT rowid FROM Name2Id WHERE user_name = ?').get(cleanedMyWxid) as any
+                  myRowId = row2?.rowid ?? null
+                  this.myRowIdCache.set(cacheKeyCleaned, myRowId)
+                }
+              } else {
+                this.myRowIdCache.set(cacheKeyOriginal, null)
+              }
+            } catch {
+              myRowId = null
+            }
+          }
+        }
+
+        // 构建查询 SQL (查询比 cursor 大的消息)
+        let sql: string
+        if (hasName2IdTable && myRowId !== null) {
+          sql = `SELECT m.*, 
+                 CASE WHEN m.real_sender_id = ? THEN 1 ELSE 0 END AS computed_is_send,
+                 n.user_name AS sender_username
+                 FROM ${tableName} m
+                 LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
+                 WHERE m.sort_seq > ?
+                 ORDER BY m.sort_seq ASC
+                 LIMIT 100`
+        } else if (hasName2IdTable) {
+          sql = `SELECT m.*, n.user_name AS sender_username
+                 FROM ${tableName} m
+                 LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid
+                 WHERE m.sort_seq > ?
+                 ORDER BY m.sort_seq ASC
+                 LIMIT 100`
+        } else {
+          sql = `SELECT * FROM ${tableName} WHERE sort_seq > ? ORDER BY sort_seq ASC LIMIT 100`
+        }
+
+        const rows = hasName2IdTable && myRowId !== null
+          ? db.prepare(sql).all(myRowId, cursor) as any[]
+          : db.prepare(sql).all(cursor) as any[]
+
+        // 解析消息
+        for (const row of rows) {
+          const content = this.decodeMessageContent(row.message_content, row.compress_content)
+          const localType = row.local_type || row.type || 1
+          const isSend = row.computed_is_send ?? row.is_send ?? null
+
+          let emojiCdnUrl: string | undefined
+          let emojiMd5: string | undefined
+          let emojiProductId: string | undefined
+          let quotedContent: string | undefined
+          let quotedSender: string | undefined
+          let imageMd5: string | undefined
+          let imageDatName: string | undefined
+          let videoMd5: string | undefined
+          let voiceDuration: number | undefined
+          let fileName: string | undefined
+          let fileSize: number | undefined
+          let fileExt: string | undefined
+          let fileMd5: string | undefined
+
+          if (localType === 47 && content) {
+            const emojiInfo = this.parseEmojiInfo(content)
+            emojiCdnUrl = emojiInfo.cdnUrl
+            emojiMd5 = emojiInfo.md5
+            emojiProductId = emojiInfo.productId
+          } else if (localType === 3 && content) {
+            const imageInfo = this.parseImageInfo(content)
+            imageMd5 = imageInfo.md5
+            imageDatName = this.parseImageDatNameFromRow(row)
+          } else if (localType === 43 && content) {
+            videoMd5 = this.parseVideoMd5(content)
+          } else if (localType === 34 && content) {
+            voiceDuration = this.parseVoiceDuration(content)
+          } else if (localType === 49 && content) {
+            // 解析文件消息
+            const fileInfo = this.parseFileInfo(content)
+            fileName = fileInfo.fileName
+            fileSize = fileInfo.fileSize
+            fileExt = fileInfo.fileExt
+            fileMd5 = fileInfo.fileMd5
+          } else if (localType === 244813135921 || (content && content.includes('<type>57</type>'))) {
+            const quoteInfo = this.parseQuoteMessage(content)
+            quotedContent = quoteInfo.content
+            quotedSender = quoteInfo.sender
+          }
+
+          const parsedContent = this.parseMessageContent(content, localType)
+
+          allNewMessages.push({
+            localId: row.local_id || 0,
+            serverId: row.server_id || 0,
+            localType,
+            createTime: row.create_time || 0,
+            sortSeq: row.sort_seq || 0,
+            isSend,
+            senderUsername: row.sender_username || null,
+            parsedContent,
+            rawContent: content,
+            emojiCdnUrl,
+            emojiMd5,
+            productId: emojiProductId,
+            quotedContent,
+            quotedSender,
+            imageMd5,
+            imageDatName,
+            videoMd5,
+            voiceDuration,
+            fileName,
+            fileSize,
+            fileExt,
+            fileMd5
+          })
+        }
+      }
+
+      if (allNewMessages.length > 0) {
+        // 排序
+        allNewMessages.sort((a, b) => a.sortSeq - b.sortSeq)
+
+        // 更新游标
+        const maxSeq = allNewMessages[allNewMessages.length - 1].sortSeq
+        this.sessionCursor.set(this.currentSessionId, maxSeq)
+
+        // 推送事件
+        this.emit('new-messages', {
+          sessionId: this.currentSessionId,
+          messages: allNewMessages
+        })
+        // console.log(`[ChatService] 推送增量消息: ${allNewMessages.length} 条`)
+      }
+
+    } catch (e) {
+      // console.error('[ChatService] 增量同步失败:', e)
     }
   }
 }

@@ -36,7 +36,7 @@ export interface ChatState {
   setFilteredSessions: (sessions: ChatSession[]) => void
   setCurrentSession: (sessionId: string | null) => void
   setLoadingSessions: (loading: boolean) => void
-  setMessages: (messages: Message[]) => void
+  setMessages: (messages: Message[] | ((prev: Message[]) => Message[])) => void
   appendMessages: (messages: Message[], prepend?: boolean) => void
   setLoadingMessages: (loading: boolean) => void
   setLoadingMore: (loading: boolean) => void
@@ -82,24 +82,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setLoadingSessions: (loading) => set({ isLoadingSessions: loading }),
 
-  setMessages: (messages) => set({ messages }),
+  setMessages: (messages) => set((state) => ({
+    messages: typeof messages === 'function' ? messages(state.messages) : messages
+  })),
 
   appendMessages: (newMessages, prepend = false) => set((state) => {
     // 使用与后端一致的多维 Key (serverId + localId + createTime + sortSeq) 进行去重
     const existingKeys = new Set(
       state.messages.map(m => `${m.serverId}-${m.localId}-${m.createTime}-${m.sortSeq}`)
     )
-    
+
     // 过滤掉已存在的消息
     const uniqueNewMessages = newMessages.filter(
       msg => !existingKeys.has(`${msg.serverId}-${msg.localId}-${msg.createTime}-${msg.sortSeq}`)
     )
-    
+
     // 如果没有新消息，直接返回原状态
     if (uniqueNewMessages.length === 0) {
       return state
     }
-    
+
     return {
       messages: prepend
         ? [...uniqueNewMessages, ...state.messages]

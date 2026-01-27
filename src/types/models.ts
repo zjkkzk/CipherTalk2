@@ -55,6 +55,11 @@ export interface Message {
   videoMd5?: string
   rawContent?: string
   productId?: string
+  // 文件消息相关
+  fileName?: string       // 文件名
+  fileSize?: number       // 文件大小（字节）
+  fileExt?: string        // 文件扩展名
+  fileMd5?: string        // 文件 MD5
 }
 
 // 分析数据

@@ -345,6 +345,10 @@ class DataManagementService {
           const time = new Date().toLocaleTimeString()
           console.error(`[${time}] [数据解密] 解密失败: ${file.fileName}`, result.error)
         }
+
+        // 关键：强制让出主线程时间片，防止批量处理时 UI 卡死
+        // 即使是 Worker 解密，连续的 IPC 通信和主线程调度也会导致卡顿
+        await new Promise(resolve => setTimeout(resolve, 10))
       }
 
       // 完成
@@ -385,12 +389,9 @@ class DataManagementService {
         return { success: false, error: '请先在设置页面配置解密密钥' }
       }
 
-      // 关闭所有可能占用数据库文件的服务
-      chatService.close()
+      // 不再关闭整个 chatService，而是在更新每个文件前只关闭那个特定的数据库
+      // 这样用户可以在增量更新时继续查看其他会话的消息
       imageDecryptService.clearHardlinkCache()
-
-      // 等待所有数据库连接完全关闭（给一些时间让文件句柄释放）
-      await new Promise(resolve => setTimeout(resolve, 2000))
 
       let successCount = 0
       let failCount = 0
@@ -401,7 +402,7 @@ class DataManagementService {
 
         // 在处理每个文件前让出时间片，避免阻塞UI
         const time = new Date().toLocaleTimeString()
-        console.log(`[${time}] [增量同步] 正在同步数据库: ${file.fileName} (${i + 1}/${totalFiles})`)
+        // console.log(`[${time}] [增量同步] 正在同步数据库: ${file.fileName} (${i + 1}/${totalFiles})`) // 减少日志
         if (i > 0) {
           await new Promise(resolve => setImmediate(resolve))
         }
@@ -432,6 +433,12 @@ class DataManagementService {
         }
 
         const backupPath = file.decryptedPath + '.old.' + Date.now()
+
+        // 在备份/覆盖文件前，先关闭该数据库的连接，释放文件锁
+        chatService.closeDatabase(file.fileName)
+        // 等待文件句柄释放
+        await new Promise(resolve => setTimeout(resolve, 100))
+
         if (fs.existsSync(file.decryptedPath!)) {
           // 尝试备份文件，如果失败则重试几次
           let backupSuccess = false
@@ -551,8 +558,8 @@ class DataManagementService {
 
         if (result.success) {
           successCount++
-          const time = new Date().toLocaleTimeString()
-          console.log(`[${time}] [增量同步] 同步成功: ${file.fileName}`)
+          // const time = new Date().toLocaleTimeString()
+          // console.log(`[${time}] [增量同步] 同步成功: ${file.fileName}`) // 减少日志
           if (fs.existsSync(backupPath)) {
             try { fs.unlinkSync(backupPath) } catch { }
           }
@@ -564,6 +571,9 @@ class DataManagementService {
             try { fs.renameSync(backupPath, file.decryptedPath!) } catch { }
           }
         }
+
+        // 关键：强制让出主线程时间片，防止批量处理时 UI 卡死
+        await new Promise(resolve => setTimeout(resolve, 10))
       }
 
       this.sendProgress({ type: 'complete' })
@@ -1346,7 +1356,7 @@ class DataManagementService {
           // 检查更新频率限制（最多每5秒更新一次）
           const now = Date.now()
           const timeSinceLastUpdate = now - this.lastUpdateTime
-          const MIN_UPDATE_INTERVAL = 5000 // 最小更新间隔：5秒
+          const MIN_UPDATE_INTERVAL = 1000 // 最小更新间隔：1秒 (配合 DLL 极速解密)
 
           if (timeSinceLastUpdate < MIN_UPDATE_INTERVAL) {
             // 如果距离上次更新不足5秒，延迟到满足间隔
@@ -1365,8 +1375,9 @@ class DataManagementService {
           }
 
           // 等待文件写入完成（微信写入数据库可能需要一些时间）
-          // 延迟2秒，确保文件完全写入完成
-          await new Promise(resolve => setTimeout(resolve, 2000))
+          // 等待文件写入完成（微信写入数据库可能需要一些时间）
+          // 延迟1秒，确保文件完全写入完成
+          await new Promise(resolve => setTimeout(resolve, 1000))
 
           // 触发更新
           this.triggerUpdate()
@@ -1391,7 +1402,7 @@ class DataManagementService {
     // 检查更新频率限制
     const now = Date.now()
     const timeSinceLastUpdate = now - this.lastUpdateTime
-    const MIN_UPDATE_INTERVAL = 2000 // 最小更新间隔：2秒 (原来是 5 秒)
+    const MIN_UPDATE_INTERVAL = 1000 // 最小更新间隔：1秒
 
     if (timeSinceLastUpdate < MIN_UPDATE_INTERVAL) {
       // 延迟到满足间隔
@@ -1430,7 +1441,7 @@ class DataManagementService {
     // 检查更新频率限制
     const now = Date.now()
     const timeSinceLastUpdate = now - this.lastUpdateTime
-    const MIN_UPDATE_INTERVAL = 2000 // 最小更新间隔减少到 2 秒 (原来是 5 秒)
+    const MIN_UPDATE_INTERVAL = 1000 // 最小更新间隔减少到 1 秒
 
     if (timeSinceLastUpdate < MIN_UPDATE_INTERVAL) {
       const remainingTime = MIN_UPDATE_INTERVAL - timeSinceLastUpdate
@@ -1470,8 +1481,8 @@ class DataManagementService {
 
       if (result.success) {
         // 通知监听器更新完成
-        const time = new Date().toLocaleTimeString()
-        console.log(`[${time}] [自动更新] 增量同步完成, 成功更新 ${result.successCount} 个文件`)
+        // const time = new Date().toLocaleTimeString()
+        // console.log(`[${time}] [自动更新] 增量同步完成, 成功更新 ${result.successCount} 个文件`) // 减少日志
         this.updateListeners.forEach(listener => listener(false))
         return { success: true, updated: result.successCount! > 0 }
       } else {

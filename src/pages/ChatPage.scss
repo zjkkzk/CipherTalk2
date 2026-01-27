@@ -1644,6 +1644,85 @@
   }
 }
 
+// 文件消息卡片
+.file-message {
+  width: 240px;
+  background: var(--card-bg);
+  border-radius: 8px;
+  padding: 12px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+
+  &:hover {
+    background: var(--bg-hover);
+    border-color: var(--primary);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  &:active {
+    transform: translateY(0);
+  }
+
+  .file-icon {
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    background: linear-gradient(135deg, #4a90d9 0%, #357abd 100%);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+
+    svg {
+      width: 24px;
+      height: 24px;
+    }
+  }
+
+  .file-info {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+
+    .file-name {
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-primary);
+      line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+
+    .file-meta {
+      font-size: 12px;
+      color: var(--text-tertiary);
+    }
+  }
+}
+
+// 发送的文件消息样式
+.message-bubble.sent .file-message {
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+
+  .file-name {
+    color: #333;
+  }
+
+  .file-meta {
+    color: #999;
+  }
+}
+
 // 转账消息卡片
 .transfer-message {
   width: 240px;

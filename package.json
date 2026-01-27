@@ -1,6 +1,6 @@
 {
   "name": "ciphertalk",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "description": "密语 - 微信聊天记录查看工具",
   "author": "ILoveBingLu",
   "license": "CC-BY-NC-SA-4.0",
@@ -20,6 +20,8 @@
   "dependencies": {
     "@types/dompurify": "^3.0.5",
     "@types/marked": "^5.0.2",
+    "@types/react-virtualized-auto-sizer": "^1.0.4",
+    "@types/react-window": "^1.8.8",
     "better-sqlite3": "^12.5.0",
     "dom-to-image-more": "^3.7.2",
     "dompurify": "^3.3.1",
@@ -40,6 +42,8 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.1.1",
+    "react-virtualized-auto-sizer": "^2.0.2",
+    "react-window": "^2.2.5",
     "sherpa-onnx-node": "^1.12.23",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2",
@@ -134,7 +138,10 @@
     "asarUnpack": [
       "node_modules/ffmpeg-static/**/*",
       "node_modules/silk-wasm/**/*",
-      "node_modules/sherpa-onnx-node/**/*"
+      "node_modules/sherpa-onnx-node/**/*",
+      "node_modules/koffi/**/*",
+      "dist-electron/workers/**/*",
+      "resources/**/*"
     ]
   }
 }
