@@ -97,7 +97,7 @@ jobs:
         run: npx electron-rebuild
 
       - name: Build app
-        run: npm run build -- --publish never
+        run: npm run build:ci
 
       - name: Validate build artifacts
         shell: pwsh
