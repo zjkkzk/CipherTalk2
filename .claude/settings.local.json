@@ -12,7 +12,9 @@
       "Bash(gh api:*)",
       "Bash(gh auth:*)",
       "WebFetch(domain:github.com)",
-      "Read(//d/JiQingzhe/GitHub项目/CipherTalk-wiki/**)"
+      "Read(//d/JiQingzhe/GitHub项目/CipherTalk-wiki/**)",
+      "Bash(npm run type-check)",
+      "Bash(npx tsc --noEmit)"
     ],
     "additionalDirectories": [
       "d:\\JiQingzhe\\GitHub项目\\CipherTalk-wiki"
